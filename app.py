@@ -32,7 +32,7 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 
     with zipfile.ZipFile(epub_stream, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-        zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
         
         if has_font and font_type == "리디바탕":
             with open(font_filename, "rb") as f: zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
@@ -61,14 +61,13 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
         ncx = f'<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{book_id}"/></head><docTitle><text>{title}</text></docTitle><navMap>{nav_points}</navMap></ncx>'
         zf.writestr("OEBPS/toc.ncx", ncx)
         
-        manifest_cover = ""
-        cover_tag = ""
         if cover_io:
             zf.writestr("OEBPS/cover.jpg", cover_io.getvalue())
-            manifest_cover = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>'
-            cover_tag = '<meta name="cover" content="cover"/>'
-
+        
         font_manifest = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if has_font else ""
+        manifest_cover = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>' if cover_io else ""
+        cover_tag = '<meta name="cover" content="cover"/>' if cover_io else ""
+        
         opf = f'<?xml version="1.0" encoding="utf-8"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{html.escape(title)}</dc:title><dc:language>ko</dc:language><dc:identifier id="uid">{book_id}</dc:identifier>{cover_tag}</metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="s" href="style.css" media-type="text/css"/>{manifest_items}{font_manifest}{manifest_cover}</manifest><spine toc="ncx">{spine_items}</spine></package>'
         zf.writestr("OEBPS/content.opf", opf)
 
@@ -81,12 +80,10 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
 
-# 세션 초기화 및 관리
 if "search_results" not in st.session_state: st.session_state.search_results = []
 if "final_cover_io" not in st.session_state: st.session_state.final_cover_io = None
 if "refresh_needed" not in st.session_state: st.session_state.refresh_needed = False
 
-# 변환 완료 후 새로고침 로직
 if st.session_state.refresh_needed:
     st.session_state.search_results = []
     st.session_state.final_cover_io = None
@@ -97,7 +94,7 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("1. 설정 및 챕터 확인")
-    u_txt = st.file_uploader("TXT 파일 선택", type="txt", key="txt_uploader")
+    u_txt = st.file_uploader("TXT 파일 선택", type="txt")
     
     f_exists = os.path.exists("RIDIBatang.otf")
     font_options = ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"]
@@ -116,8 +113,11 @@ with col1:
         except:
             text = raw_bytes.decode('cp949', errors='ignore')
 
+        # [제목 정제 로직 강화]
         raw_filename = Path(u_txt.name).stem
         clean_name = re.sub(r'[+_]', ' ', raw_filename)
+        # 파일명으로 사용할 수 없는 문자 제거 (\ / : * ? " < > |)
+        clean_name = re.sub(r'[\/:*?"<>|]', '', clean_name)
         clean_name = re.sub(r'\s+', ' ', clean_name).strip()
         
         display_title = st.text_input("책 제목", value=clean_name)
@@ -168,7 +168,7 @@ with col2:
     cover_mode = st.radio("표지 획득 방법", ["이미지 업로드", "이미지 검색"], horizontal=True)
     
     if cover_mode == "이미지 업로드":
-        u_cover = st.file_uploader("표지 이미지 선택", type=["jpg", "jpeg", "png"], key="cover_uploader")
+        u_cover = st.file_uploader("표지 이미지 선택", type=["jpg", "jpeg", "png"])
         if u_cover:
             st.session_state.final_cover_io = io.BytesIO(u_cover.getvalue())
             st.image(u_cover, caption="미리보기", width=120)
@@ -178,7 +178,7 @@ with col2:
             try:
                 with DDGS() as ddgs:
                     st.session_state.search_results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-            except: st.error("검색 제한입니다. 잠시 후 시도하세요.")
+            except: st.error("검색 제한입니다.")
         
         if st.session_state.search_results:
             grid = st.columns(3)
@@ -199,17 +199,21 @@ with col2:
 st.divider()
 
 # -------------------------
-# 3. 변환 및 자동 초기화 섹션
+# 3. 안전한 다운로드 섹션
 # -------------------------
 if u_txt and final_chapters:
-    # 'on_click'을 사용하여 버튼 클릭 시 초기화 플래그를 True로 설정
+    # 파일명 안전성 확보 (특수문자 제거 및 길이 제한)
+    safe_filename = re.sub(r'[\/:*?"<>|]', '', display_title)
+    safe_filename = safe_filename[:50]  # 너무 길면 오류 발생 가능
+    if not safe_filename: safe_filename = "converted_ebook"
+
     def trigger_refresh():
         st.session_state.refresh_needed = True
 
     st.download_button(
-        label="💾 EPUB 변환 및 지금 바로 저장 (저장 후 자동 초기화)",
+        label="💾 EPUB 변환 및 지금 바로 저장",
         data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
-        file_name=f"{display_title}.epub",
+        file_name=f"{safe_filename}.epub",
         mime="application/epub+zip",
         type="primary",
         use_container_width=True,
@@ -217,16 +221,13 @@ if u_txt and final_chapters:
     )
 
 # 후원 배너
-st.write("") 
 st.markdown(
     """
     <hr style="border:0.5px solid #f0f2f6">
     <div style="text-align: center;">
         <p style="color: #666; font-size: 0.9em;">이 도구가 도움이 되셨나요?</p>
         <a href="https://buymeacoffee.com/goepark" target="_blank">
-            <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" 
-                 alt="Buy Me A Coffee" 
-                 style="height: 45px !important; width: 160px !important;" >
+            <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 45px !important; width: 160px !important;" >
         </a>
     </div>
     """,
