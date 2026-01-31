@@ -8,11 +8,11 @@ import re
 import requests
 from pathlib import Path
 from duckduckgo_search import DDGS
-from PIL import Image
 
-# --- 1. EPUB 생성 엔진 (기존과 동일) ---
+# -------------------------
+# 1. EPUB 생성 및 엔진 (챕터 인식 강화 버전)
+# -------------------------
 def build_epub_buffer(txt_content, title, font_type, cover_io=None):
-    # (이전 코드와 동일하므로 지면 관계상 핵심 로직 유지)
     epub_stream = io.BytesIO()
     book_id = str(uuid.uuid4())
     font_filename = "RIDIBatang.otf"
@@ -29,21 +29,38 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
     h1 {{ text-align: center; margin-top: 4em; }}
     '''
 
-    CHAPTER_PATTERN = r'^(제\s?\d+\s?[화장]|[\d\.]+\s|\[.+\])'
+    # --- 개선된 제목 인식 로직 ---
     raw_lines = txt_content.splitlines()
     chapters = []
     current_title, current_lines = "시작", []
 
     for line in raw_lines:
-        line = line.strip()
-        if not line: continue
-        if re.match(CHAPTER_PATTERN, line):
+        clean_line = line.strip()
+        if not clean_line: continue
+        
+        is_title = False
+        # 규칙 1: '제 1화', '제 10장' 등 (가장 표준)
+        if re.match(r'^제\s?\d+\s?[화장장편절]', clean_line):
+            is_title = True
+        # 규칙 2: '숫자.' 또는 '숫자 '로 시작하고 총 길이가 20자 미만인 경우
+        elif re.match(r'^\d+[\.\s]', clean_line) and len(clean_line) < 20:
+            is_title = True
+        # 규칙 3: 대괄호나 꺽쇠로 시작하고 총 길이가 15자 미만인 경우 (대사 방지)
+        elif re.match(r'^[[<].+[]>]', clean_line) and len(clean_line) < 15:
+            is_title = True
+        # 규칙 4: 숫자만 있는 줄
+        elif re.match(r'^\d+$', clean_line):
+            is_title = True
+
+        if is_title:
             if current_lines: chapters.append((current_title, current_lines))
-            current_title, current_lines = line, []
+            current_title, current_lines = clean_line, []
         else:
-            current_lines.append(html.escape(line))
+            current_lines.append(html.escape(clean_line))
+            
     if current_lines: chapters.append((current_title, current_lines))
     if not chapters: chapters.append(("본문", [html.escape(p) for p in raw_lines if p.strip()]))
+    # ---------------------------
 
     with zipfile.ZipFile(epub_stream, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -80,10 +97,10 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
     return epub_stream
 
 # -------------------------
-# 2. UI 레이아웃
+# 2. UI 및 로직
 # -------------------------
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
-st.title("📚 올인원 EPUB 변환기 (안정화 버전)")
+st.title("📚 스마트 EPUB 변환기")
 
 if "results" not in st.session_state: st.session_state.results = []
 if "selected_cover" not in st.session_state: st.session_state.selected_cover = None
@@ -91,14 +108,36 @@ if "selected_cover" not in st.session_state: st.session_state.selected_cover = N
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("1. 설정 및 파일")
+    st.header("1. 설정 및 챕터 확인")
     u_txt = st.file_uploader("TXT 파일 선택", type="txt", key="txt_loader")
     
-    # 제목 자동 정제 (1-304 완 같은 꼬리표 제거 시도)
-    raw_title = Path(u_txt.name).stem if u_txt else ""
-    clean_title = re.sub(r'[\d\-]+.*$', '', raw_title).strip() # 숫자/기호 이후 제거
-    title = st.text_input("책 제목", value=clean_title if clean_title else "제목 없음")
-    
+    if u_txt:
+        raw_data = u_txt.getvalue()
+        try: text = raw_data.decode("utf-8")
+        except: text = raw_data.decode("cp949", errors="ignore")
+        
+        # 제목 정제 및 분석
+        raw_title = Path(u_txt.name).stem
+        clean_title = re.sub(r'[\d\-]+.*$', '', raw_title).strip()
+        title = st.text_input("책 제목", value=clean_title if clean_title else "제목 없음")
+
+        # 실시간 챕터 확인 로직
+        detected = []
+        for line in text.splitlines():
+            cl = line.strip()
+            if not cl: continue
+            if (re.match(r'^제\s?\d+\s?[화장장편절]', cl) or 
+                (re.match(r'^\d+[\.\s]', cl) and len(cl) < 20) or 
+                (re.match(r'^[[<].+[]>]', cl) and len(cl) < 15) or
+                re.match(r'^\d+$', cl)):
+                detected.append(cl)
+
+        with st.expander(f"🔍 인식된 챕터 목록 ({len(detected)}개)", expanded=True):
+            if detected:
+                st.code("\n".join(detected[:50]) + ("\n..." if len(detected) > 50 else ""))
+            else:
+                st.warning("인식된 챕터가 없습니다.")
+
     st.sidebar.header("📖 디자인 설정")
     f_exists = os.path.exists("RIDIBatang.otf")
     f_type = st.sidebar.selectbox("폰트", ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"])
@@ -112,19 +151,14 @@ with col2:
         if st.button("🔍 이미지 검색", use_container_width=True):
             try:
                 with DDGS() as ddgs:
-                    # 검색 결과 가져오기 (예외 처리 추가)
                     st.session_state.results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-                    if not st.session_state.results:
-                        st.warning("검색 결과가 없습니다.")
-            except Exception as e:
-                st.error("검색 제한에 걸렸습니다. 잠시 후 다시 시도하거나 URL을 직접 입력하세요.")
+            except:
+                st.error("검색 제한입니다. 잠시 후 다시 시도하세요.")
     
     with c2:
-        direct_url = st.text_input("직접 이미지 URL 입력", placeholder="http://...")
-        if direct_url:
-            st.session_state.selected_cover = direct_url
+        direct_url = st.text_input("직접 이미지 URL 입력")
+        if direct_url: st.session_state.selected_cover = direct_url
 
-    # 검색 결과 그리드
     if st.session_state.results:
         grid = st.columns(3)
         for i, url in enumerate(st.session_state.results):
@@ -137,23 +171,20 @@ with col2:
 st.divider()
 
 if u_txt:
-    if st.session_state.selected_cover:
-        st.write(f"✅ 선택된 표지: {st.session_state.selected_cover[:60]}...")
-    
     if st.button("🚀 EPUB 변환 및 다운로드", type="primary", use_container_width=True):
         with st.spinner("최종 제작 중..."):
-            txt_data = u_txt.read()
-            try: text = txt_data.decode("utf-8")
-            except: text = txt_data.decode("cp949", errors="ignore")
+            u_txt.seek(0)
+            data = u_txt.read()
+            try: text = data.decode("utf-8")
+            except: text = data.decode("cp949", errors="ignore")
             
             c_io = None
             if st.session_state.selected_cover:
                 try:
                     r = requests.get(st.session_state.selected_cover, timeout=10)
                     c_io = io.BytesIO(r.content)
-                except:
-                    st.error("이미지를 다운로드할 수 없습니다. 다른 이미지를 선택해 보세요.")
+                except: pass
             
             final_epub = build_epub_buffer(text, title, f_type, c_io)
             st.success("변환 성공!")
-            st.download_button("📥 완성된 파일 저장", data=final_epub, file_name=f"{title}.epub")
+            st.download_button("📥 파일 저장", data=final_epub, file_name=f"{title}.epub")
