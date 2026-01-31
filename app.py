@@ -8,9 +8,10 @@ import re
 import requests
 from pathlib import Path
 from duckduckgo_search import DDGS
+from PIL import Image
 
 # -------------------------
-# 1. EPUB 생성 엔진 (성능 및 인식 최적화)
+# 1. EPUB 생성 엔진
 # -------------------------
 def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
@@ -76,13 +77,14 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     return epub_stream
 
 # -------------------------
-# 2. UI 및 제목 판별 로직
+# 2. UI 및 로직
 # -------------------------
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
 
-if "results" not in st.session_state: st.session_state.results = []
-if "selected_cover" not in st.session_state: st.session_state.selected_cover = None
+# 세션 상태 초기화
+if "search_results" not in st.session_state: st.session_state.search_results = []
+if "final_cover_io" not in st.session_state: st.session_state.final_cover_io = None
 
 col1, col2 = st.columns([1, 1])
 
@@ -108,33 +110,20 @@ with col1:
         if use_split == "챕터분할 적용함":
             temp_chapters = []
             curr_t, curr_l = "시작", []
-
             for line in raw_lines:
                 cl = line.strip()
                 if not cl: continue
-                
                 is_ch = False
-                
-                # 1. 명확한 챕터 패턴 (제 1화, 10장 등)
-                if re.match(r'^제\s?\d+\s?[화장장편절]', cl):
-                    is_ch = True
-                # 2. 숫자로 시작하는 짧은 제목 (스코어 제외)
-                elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl):
-                    is_ch = True
-                # 3. [수정됨] 대괄호/꺽쇠 필터링 강화
+                if re.match(r'^제\s?\d+\s?[화장장편절]', cl): is_ch = True
+                elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl): is_ch = True
                 elif re.match(r'^[[<].+[]>]', cl) and len(cl) < 15:
-                    # 마침표(.)가 있거나, 대화형 문장이면 제목에서 제외
-                    if not any(char in cl for char in ['.', '!', '?']):
-                        is_ch = True
-                # 4. 순수 숫자만 있는 경우
-                elif re.match(r'^\d+$', cl):
-                    is_ch = True
+                    if not any(char in cl for char in ['.', '!', '?', ']', '>']): is_ch = True
+                elif re.match(r'^\d+$', cl): is_ch = True
 
                 if is_ch:
                     if curr_l: temp_chapters.append((curr_t, curr_l))
                     curr_t, curr_l = cl, []
-                else:
-                    curr_l.append(html.escape(cl))
+                else: curr_l.append(html.escape(cl))
             if curr_l: temp_chapters.append((curr_t, curr_l))
 
             st.write("### 챕터 필터링")
@@ -147,8 +136,7 @@ with col1:
             if temp_chapters:
                 processed_ch = []
                 for idx, (t, l) in enumerate(temp_chapters):
-                    if idx in selected_indices:
-                        processed_ch.append([t, l])
+                    if idx in selected_indices: processed_ch.append([t, l])
                     else:
                         if processed_ch: processed_ch[-1][1].extend([f"[{t}]"] + l)
                         else: processed_ch.append(["본문", [f"[{t}]"] + l])
@@ -160,40 +148,53 @@ with col1:
     else:
         display_title = st.text_input("책 제목", value="제목 없음")
 
+with col2:
+    st.header("2. 표지 설정")
+    
+    cover_mode = st.radio("표지 획득 방법", ["이미지 업로드", "이미지 검색"], horizontal=True)
+    
+    if cover_mode == "이미지 업로드":
+        u_cover = st.file_uploader("표지 이미지 선택 (JPG, PNG)", type=["jpg", "jpeg", "png"])
+        if u_cover:
+            st.session_state.final_cover_io = io.BytesIO(u_cover.getvalue())
+            # 미리보기 창
+            st.image(u_cover, caption="업로드된 표지 미리보기", width=150)
+            st.success("업로드 완료!")
+
+    else:
+        search_q = st.text_input("검색어", value=f"{display_title} 소설 표지")
+        if st.button("🔍 이미지 검색", use_container_width=True):
+            try:
+                with DDGS() as ddgs:
+                    st.session_state.search_results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
+            except: st.error("검색 제한입니다. 잠시 후 다시 시도하거나 이미지를 업로드하세요.")
+        
+        if st.session_state.search_results:
+            grid = st.columns(3)
+            for i, url in enumerate(st.session_state.search_results):
+                with grid[i % 3]:
+                    st.image(url, use_container_width=True)
+                    if st.button(f"{i+1}번 선택", key=f"cover_btn_{i}"):
+                        try:
+                            r = requests.get(url, timeout=10)
+                            st.session_state.final_cover_io = io.BytesIO(r.content)
+                            st.toast(f"{i+1}번 이미지 선택됨!")
+                        except: st.error("이미지를 불러올 수 없습니다.")
+        
+        if st.session_state.final_cover_io:
+            st.divider()
+            st.image(st.session_state.final_cover_io, caption="선택된 검색 이미지 미리보기", width=150)
+
+st.divider()
+
+# 다운로드 섹션
+if u_txt and final_chapters:
     st.sidebar.header("📖 디자인 설정")
     f_exists = os.path.exists("RIDIBatang.otf")
     f_type = st.sidebar.selectbox("폰트", ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"])
 
-with col2:
-    st.header("2. 표지 선택")
-    search_q = st.text_input("검색어", value=f"{display_title} 소설 표지")
-    if st.button("🔍 이미지 검색", use_container_width=True):
-        try:
-            with DDGS() as ddgs:
-                st.session_state.results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-        except: st.error("검색 제한입니다.")
-    
-    if st.session_state.results:
-        grid = st.columns(3)
-        for i, url in enumerate(st.session_state.results):
-            with grid[i % 3]:
-                st.image(url, use_container_width=True)
-                if st.button(f"{i+1}번 선택", key=f"cover_{i}"):
-                    st.session_state.selected_cover = url
-                    st.toast("표지 선택됨!")
-
-st.divider()
-
-if u_txt and final_chapters:
     if st.button("🚀 EPUB 변환 및 다운로드", type="primary", use_container_width=True):
         with st.spinner("최종 빌드 중..."):
-            c_io = None
-            if st.session_state.selected_cover:
-                try:
-                    r = requests.get(st.session_state.selected_cover, timeout=10)
-                    c_io = io.BytesIO(r.content)
-                except: pass
-            
-            final_epub = build_epub_buffer(final_chapters, display_title, f_type, c_io)
-            st.success(f"변환 완료! (챕터: {len(final_chapters)}개)")
+            final_epub = build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io)
+            st.success("변환 완료!")
             st.download_button("📥 파일 저장", data=final_epub, file_name=f"{display_title}.epub")
