@@ -32,7 +32,7 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 
     with zipfile.ZipFile(epub_stream, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
-        zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
         
         if has_font and font_type == "리디바탕":
             with open(font_filename, "rb") as f: zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
@@ -80,14 +80,15 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
 
+# 세션 상태 초기화
 if "search_results" not in st.session_state: st.session_state.search_results = []
 if "final_cover_io" not in st.session_state: st.session_state.final_cover_io = None
 if "refresh_needed" not in st.session_state: st.session_state.refresh_needed = False
 
+# 리프레시 로직
 if st.session_state.refresh_needed:
-    st.session_state.search_results = []
-    st.session_state.final_cover_io = None
-    st.session_state.refresh_needed = False
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     st.rerun()
 
 col1, col2 = st.columns([1, 1])
@@ -113,11 +114,9 @@ with col1:
         except:
             text = raw_bytes.decode('cp949', errors='ignore')
 
-        # [제목 정제 로직 강화]
+        # 파일명 정제 및 표시용 제목 설정
         raw_filename = Path(u_txt.name).stem
         clean_name = re.sub(r'[+_]', ' ', raw_filename)
-        # 파일명으로 사용할 수 없는 문자 제거 (\ / : * ? " < > |)
-        clean_name = re.sub(r'[\/:*?"<>|]', '', clean_name)
         clean_name = re.sub(r'\s+', ' ', clean_name).strip()
         
         display_title = st.text_input("책 제목", value=clean_name)
@@ -199,21 +198,27 @@ with col2:
 st.divider()
 
 # -------------------------
-# 3. 안전한 다운로드 섹션
+# 3. 강화된 안전 저장 섹션
 # -------------------------
 if u_txt and final_chapters:
-    # 파일명 안전성 확보 (특수문자 제거 및 길이 제한)
-    safe_filename = re.sub(r'[\/:*?"<>|]', '', display_title)
-    safe_filename = safe_filename[:50]  # 너무 길면 오류 발생 가능
-    if not safe_filename: safe_filename = "converted_ebook"
+    # 1. 파일명에서 위험한 특수문자 제거 (\ / : * ? " < > |)
+    safe_name = re.sub(r'[\/:*?"<>|]', '', display_title)
+    # 2. 공백을 언더바 혹은 그대로 유지하되 앞뒤 공백 제거
+    safe_name = safe_name.strip()
+    # 3. 파일명이 너무 짧거나 긴 경우 처리
+    if not safe_name: safe_name = "ebook"
+    final_filename = f"{safe_name}.epub"
 
     def trigger_refresh():
         st.session_state.refresh_needed = True
 
+    # 데이터 생성 시점을 버튼 클릭과 완벽히 동기화
+    epub_data = build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io)
+
     st.download_button(
         label="💾 EPUB 변환 및 지금 바로 저장",
-        data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
-        file_name=f"{safe_filename}.epub",
+        data=epub_data,
+        file_name=final_filename,
         mime="application/epub+zip",
         type="primary",
         use_container_width=True,
@@ -225,7 +230,7 @@ st.markdown(
     """
     <hr style="border:0.5px solid #f0f2f6">
     <div style="text-align: center;">
-        <p style="color: #666; font-size: 0.9em;">이 도구가 도움이 되셨나요?</p>
+        <p style="color: #666; font-size: 0.9em;">도움이 되셨다면 응원해 주세요!</p>
         <a href="https://buymeacoffee.com/goepark" target="_blank">
             <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 45px !important; width: 160px !important;" >
         </a>
