@@ -10,9 +10,9 @@ from pathlib import Path
 from duckduckgo_search import DDGS
 
 # -------------------------
-# 1. EPUB 생성 엔진
+# 1. EPUB 생성 엔진 (성능 최적화)
 # -------------------------
-def build_epub_buffer(txt_content, title, font_type, cover_io=None):
+def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
     book_id = str(uuid.uuid4())
     font_filename = "RIDIBatang.otf"
@@ -29,136 +29,142 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
     h1 {{ text-align: center; margin-top: 4em; }}
     '''
 
-    raw_lines = txt_content.splitlines()
-    chapters = []
-    current_title, current_lines = "시작", []
-
-    for line in raw_lines:
-        clean_line = line.strip()
-        if not clean_line: continue
-        
-        is_title = False
-        if re.match(r'^제\s?\d+\s?[화장장편절]', clean_line):
-            is_title = True
-        elif re.match(r'^\d+[\.\s]', clean_line) and len(clean_line) < 20:
-            is_title = True
-        elif re.match(r'^[[<].+[]>]', clean_line) and len(clean_line) < 15:
-            is_title = True
-        elif re.match(r'^\d+$', clean_line):
-            is_title = True
-
-        if is_title:
-            if current_lines: chapters.append((current_title, current_lines))
-            current_title, current_lines = clean_line, []
-        else:
-            current_lines.append(html.escape(clean_line))
-            
-    if current_lines: chapters.append((current_title, current_lines))
-    if not chapters: chapters.append(("본문", [html.escape(p) for p in raw_lines if p.strip()]))
-
     with zipfile.ZipFile(epub_stream, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
         zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        
         if has_font and font_type == "리디바탕":
             with open(font_filename, "rb") as f: zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
         zf.writestr("OEBPS/style.css", css_content)
 
         manifest_items, spine_items, nav_points = "", "", ""
-        for i, (ch_t, ch_l) in enumerate(chapters):
+        
+        # 뷰어 로딩 속도 향상을 위해 너무 긴 본문은 자동으로 쪼개기
+        processed_chunks = []
+        for ch_t, ch_l in chapters_to_include:
+            # 한 챕터가 대략 5,000자(문단 단위)를 넘지 않도록 재분할
+            chunk_size = 50 
+            for i in range(0, len(ch_l), chunk_size):
+                sub_l = ch_l[i:i+chunk_size]
+                # 첫 번째 조각에만 챕터 제목 표시, 나머지는 생략
+                sub_t = ch_t if i == 0 else f"{ch_t} (계속)"
+                processed_chunks.append((sub_t, sub_l))
+
+        for i, (ch_t, ch_l) in enumerate(processed_chunks):
             fname = f"ch_{i}.xhtml"
             header = f"<h1>{html.escape(title)}</h1>" if i == 0 else ""
-            xhtml = f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" type="text/css" href="style.css"/></head><body>{header}<h2>{html.escape(ch_t)}</h2>{"".join([f"<p>{l}</p>" for l in ch_l])}</body></html>'
+            # 실제 제목이 "(계속)"인 경우는 화면에 h2를 표시하지 않음 (시각적 연속성)
+            display_title = "" if "(계속)" in ch_t else f"<h2>{html.escape(ch_t)}</h2>"
+            
+            xhtml = f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" type="text/css" href="style.css"/></head><body>{header}{display_title}{"".join([f"<p>{l}</p>" for l in ch_l])}</body></html>'
             zf.writestr(f"OEBPS/{fname}", xhtml)
             manifest_items += f'<item id="c{i}" href="{fname}" media-type="application/xhtml+xml"/>\n'
             spine_items += f'<itemref idref="c{i}"/>\n'
-            nav_points += f'<navPoint id="p{i}" playOrder="{i+1}"><navLabel><text>{ch_t}</text></navLabel><content src="{fname}"/></navPoint>'
+            # 목차에는 "(계속)" 조각은 넣지 않음
+            if "(계속)" not in ch_t:
+                nav_points += f'<navPoint id="p{i}" playOrder="{len(nav_points)+1}"><navLabel><text>{ch_t}</text></navLabel><content src="{fname}"/></navPoint>'
 
         ncx = f'<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{book_id}"/></head><docTitle><text>{title}</text></docTitle><navMap>{nav_points}</navMap></ncx>'
         zf.writestr("OEBPS/toc.ncx", ncx)
-        font_manifest = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if has_font else ""
-        cover_tag, manifest_cover = "", ""
+        
+        manifest_cover = ""
+        cover_tag = ""
         if cover_io:
             zf.writestr("OEBPS/cover.jpg", cover_io.getvalue())
             manifest_cover = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>'
             cover_tag = '<meta name="cover" content="cover"/>'
 
+        font_manifest = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if has_font else ""
         opf = f'<?xml version="1.0" encoding="utf-8"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{html.escape(title)}</dc:title><dc:language>ko</dc:language><dc:identifier id="uid">{book_id}</dc:identifier>{cover_tag}</metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="s" href="style.css" media-type="text/css"/>{manifest_items}{font_manifest}{manifest_cover}</manifest><spine toc="ncx">{spine_items}</spine></package>'
         zf.writestr("OEBPS/content.opf", opf)
+
     epub_stream.seek(0)
     return epub_stream
 
 # -------------------------
-# 2. UI 레이아웃
+# 2. UI 및 로직 (동일)
 # -------------------------
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
-st.title("📚 스마트 EPUB 변환기")
+st.title("📚 스마트 EPUB 변환기 PRO")
 
-# 초기 세션 상태 설정
 if "results" not in st.session_state: st.session_state.results = []
 if "selected_cover" not in st.session_state: st.session_state.selected_cover = None
 
 col1, col2 = st.columns([1, 1])
 
-# --- 1번 컬럼: 제목 변수 초기값 선언으로 NameError 방지 ---
 with col1:
-    st.header("1. 설정 및 챕터 확인")
-    u_txt = st.file_uploader("TXT 파일 선택", type="txt", key="txt_loader")
+    st.header("1. 파일 및 챕터 설정")
+    u_txt = st.file_uploader("TXT 파일 선택", type="txt")
+    use_split = st.radio("챕터 분할 모드", ["챕터분할 적용함", "안함"], horizontal=True)
     
-    # 파일을 선택하기 전에도 'title'이 존재하도록 기본값 설정
     display_title = "제목 없음"
-    
+    final_chapters = []
+
     if u_txt:
         raw_data = u_txt.getvalue()
         try: text = raw_data.decode("utf-8")
         except: text = raw_data.decode("cp949", errors="ignore")
         
-        # 파일명에서 제목 추출
-        raw_file_name = Path(u_txt.name).stem
-        clean_file_name = re.sub(r'[\d\-]+.*$', '', raw_file_name).strip()
-        display_title = st.text_input("책 제목", value=clean_file_name if clean_file_name else "제목 없음")
+        raw_name = Path(u_txt.name).stem
+        clean_name = re.sub(r'[\d\-]+.*$', '', raw_name).strip()
+        display_title = st.text_input("책 제목", value=clean_name if clean_name else "제목 없음")
         
-        # 챕터 감지
-        detected = []
-        for line in text.splitlines():
-            cl = line.strip()
-            if not cl: continue
-            if (re.match(r'^제\s?\d+\s?[화장장편절]', cl) or 
-                (re.match(r'^\d+[\.\s]', cl) and len(cl) < 20) or 
-                (re.match(r'^[[<].+[]>]', cl) and len(cl) < 15) or
-                re.match(r'^\d+$', cl)):
-                detected.append(cl)
+        raw_lines = text.splitlines()
+        
+        if use_split == "챕터분할 적용함":
+            temp_chapters = []
+            curr_t, curr_l = "시작", []
+            for line in raw_lines:
+                cl = line.strip()
+                if not cl: continue
+                is_ch = False
+                if re.match(r'^제\s?\d+\s?[화장장편절]', cl): is_ch = True
+                elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl): is_ch = True
+                elif re.match(r'^[[<].+[]>]', cl) and len(cl) < 15: is_ch = True
+                elif re.match(r'^\d+$', cl): is_ch = True
 
-        with st.expander(f"🔍 인식된 챕터 목록 ({len(detected)}개)", expanded=True):
-            if detected:
-                st.code("\n".join(detected[:50]) + ("\n..." if len(detected) > 50 else ""))
-            else:
-                st.warning("인식된 챕터가 없습니다.")
+                if is_ch:
+                    if curr_l: temp_chapters.append((curr_t, curr_l))
+                    curr_t, curr_l = cl, []
+                else: curr_l.append(html.escape(cl))
+            if curr_l: temp_chapters.append((curr_t, curr_l))
+
+            st.write("### 챕터 필터링")
+            selected_indices = []
+            with st.container(height=300):
+                for idx, (t, _) in enumerate(temp_chapters):
+                    if st.checkbox(t, value=True, key=f"ch_{idx}"):
+                        selected_indices.append(idx)
+            
+            if temp_chapters:
+                processed_ch = []
+                for idx, (t, l) in enumerate(temp_chapters):
+                    if idx in selected_indices: processed_ch.append([t, l])
+                    else:
+                        if processed_ch: processed_ch[-1][1].extend([f"[{t}]"] + l)
+                        else: processed_ch.append(["본문", [f"[{t}]"] + l])
+                final_chapters = processed_ch
+        else:
+            all_content = [html.escape(line.strip()) for line in raw_lines if line.strip()]
+            final_chapters = [("본문", all_content)]
+            st.info("성능 최적화를 위해 내부적으로 본문을 자동 분할하여 생성합니다.")
+
     else:
-        # 파일이 없을 때도 텍스트 입력을 통해 검색어를 조절할 수 있게 함
         display_title = st.text_input("책 제목", value="제목 없음")
 
     st.sidebar.header("📖 디자인 설정")
     f_exists = os.path.exists("RIDIBatang.otf")
     f_type = st.sidebar.selectbox("폰트", ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"])
 
-# --- 2번 컬럼: 정의된 display_title 사용 ---
 with col2:
     st.header("2. 표지 선택")
     search_q = st.text_input("검색어", value=f"{display_title} 소설 표지")
+    if st.button("🔍 이미지 검색", use_container_width=True):
+        try:
+            with DDGS() as ddgs:
+                st.session_state.results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
+        except: st.error("검색 제한입니다.")
     
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("🔍 이미지 검색", use_container_width=True):
-            try:
-                with DDGS() as ddgs:
-                    st.session_state.results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-            except:
-                st.error("검색 제한입니다. 잠시 후 다시 시도하세요.")
-    
-    with c2:
-        direct_url = st.text_input("직접 이미지 URL 입력")
-        if direct_url: st.session_state.selected_cover = direct_url
-
     if st.session_state.results:
         grid = st.columns(3)
         for i, url in enumerate(st.session_state.results):
@@ -166,25 +172,19 @@ with col2:
                 st.image(url, use_container_width=True)
                 if st.button(f"{i+1}번 선택", key=f"cover_{i}"):
                     st.session_state.selected_cover = url
-                    st.toast(f"{i+1}번 표지 선택됨!")
+                    st.toast("표지 선택됨!")
 
 st.divider()
 
-if u_txt:
+if u_txt and final_chapters:
     if st.button("🚀 EPUB 변환 및 다운로드", type="primary", use_container_width=True):
-        with st.spinner("최종 제작 중..."):
-            u_txt.seek(0)
-            data = u_txt.read()
-            try: text = data.decode("utf-8")
-            except: text = data.decode("cp949", errors="ignore")
-            
+        with st.spinner("로딩 최적화 빌드 중..."):
             c_io = None
             if st.session_state.selected_cover:
                 try:
                     r = requests.get(st.session_state.selected_cover, timeout=10)
                     c_io = io.BytesIO(r.content)
                 except: pass
-            
-            final_epub = build_epub_buffer(text, display_title, f_type, c_io)
-            st.success("변환 성공!")
+            final_epub = build_epub_buffer(final_chapters, display_title, f_type, c_io)
+            st.success("최적화 완료!")
             st.download_button("📥 파일 저장", data=final_epub, file_name=f"{display_title}.epub")
