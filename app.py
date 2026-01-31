@@ -8,9 +8,10 @@ import re
 import requests
 from pathlib import Path
 from duckduckgo_search import DDGS
+from charset_normalizer import from_bytes  # 인코딩 인식을 위해 꼭 필요!
 
 # -------------------------
-# 1. EPUB 생성 엔진 (성능 최적화)
+# 1. EPUB 생성 엔진
 # -------------------------
 def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
@@ -60,14 +61,13 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
         ncx = f'<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{book_id}"/></head><docTitle><text>{title}</text></docTitle><navMap>{nav_points}</navMap></ncx>'
         zf.writestr("OEBPS/toc.ncx", ncx)
         
-        manifest_cover = ""
-        cover_tag = ""
         if cover_io:
             zf.writestr("OEBPS/cover.jpg", cover_io.getvalue())
-            manifest_cover = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>'
-            cover_tag = '<meta name="cover" content="cover"/>'
-
+        
         font_manifest = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if has_font else ""
+        manifest_cover = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>' if cover_io else ""
+        cover_tag = '<meta name="cover" content="cover"/>' if cover_io else ""
+        
         opf = f'<?xml version="1.0" encoding="utf-8"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{html.escape(title)}</dc:title><dc:language>ko</dc:language><dc:identifier id="uid">{book_id}</dc:identifier>{cover_tag}</metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="s" href="style.css" media-type="text/css"/>{manifest_items}{font_manifest}{manifest_cover}</manifest><spine toc="ncx">{spine_items}</spine></package>'
         zf.writestr("OEBPS/content.opf", opf)
 
@@ -95,17 +95,24 @@ with col1:
     
     use_split = st.radio("챕터 분할 모드", ["챕터분할 적용함", "안함"], horizontal=True)
     
-    display_title = "제목 없음"
+    display_title = ""
     final_chapters = []
 
     if u_txt:
-        raw_data = u_txt.getvalue()
-        try: text = raw_data.decode("utf-8")
-        except: text = raw_data.decode("cp949", errors="ignore")
+        raw_bytes = u_txt.getvalue()
+        # [인코딩 인식] 깨짐 방지
+        try:
+            detected = from_bytes(raw_bytes).best()
+            text = str(detected) if detected else raw_bytes.decode('utf-8', errors='ignore')
+        except:
+            text = raw_bytes.decode('cp949', errors='ignore')
+
+        # [제목 정제] 하이픈(-)은 유지, +와 _만 공백으로
+        raw_filename = Path(u_txt.name).stem
+        clean_name = re.sub(r'[+_]', ' ', raw_filename)  # - 제거됨
+        clean_name = re.sub(r'\s+', ' ', clean_name).strip()
         
-        raw_name = Path(u_txt.name).stem
-        clean_name = re.sub(r'[\d\-]+.*$', '', raw_name).strip()
-        display_title = st.text_input("책 제목", value=clean_name if clean_name else "제목 없음")
+        display_title = st.text_input("책 제목", value=clean_name)
         
         raw_lines = text.splitlines()
         
@@ -144,8 +151,7 @@ with col1:
                         else: processed_ch.append(["본문", [f"[{t}]"] + l])
                 final_chapters = processed_ch
         else:
-            all_content = [html.escape(line.strip()) for line in raw_lines if line.strip()]
-            final_chapters = [("본문", all_content)]
+            final_chapters = [("본문", [html.escape(l.strip()) for l in raw_lines if l.strip()])]
     else:
         display_title = st.text_input("책 제목", value="제목 없음")
 
@@ -184,18 +190,12 @@ with col2:
 
 st.divider()
 
-# --- 수정된 핵심 섹션 ---
 if u_txt and final_chapters:
-    # 폰트와 표지 데이터를 미리 준비
-    with st.spinner("🚀 EPUB 파일을 생성 중입니다..."):
-        # st.download_button 자체가 변환과 다운로드를 동시에 수행하도록 로직 통합
-        # 버튼을 누르는 순간 build_epub_buffer가 실행되어 다운로드 창이 뜹니다.
-        st.download_button(
-            label="💾 EPUB 변환 및 지금 바로 저장",
-            data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
-            file_name=f"{display_title}.epub",
-            mime="application/epub+zip",
-            type="primary",
-            use_container_width=True
-        )
-        st.info("위 버튼을 누르면 변환이 즉시 완료되고 저장 창이 나타납니다.")
+    st.download_button(
+        label="💾 EPUB 변환 및 지금 바로 저장",
+        data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
+        file_name=f"{display_title}.epub",
+        mime="application/epub+zip",
+        type="primary",
+        use_container_width=True
+    )

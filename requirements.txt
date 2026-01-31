@@ -1,4 +1,5 @@
 streamlit
-duckduckgo_search
 requests
+duckduckgo_search
+charset-normalizer
 Pillow
