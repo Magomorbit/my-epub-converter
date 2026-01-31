@@ -10,7 +10,7 @@ from pathlib import Path
 from duckduckgo_search import DDGS
 
 # -------------------------
-# 1. EPUB 생성 및 엔진 (챕터 인식 강화 버전)
+# 1. EPUB 생성 엔진
 # -------------------------
 def build_epub_buffer(txt_content, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
@@ -29,7 +29,6 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
     h1 {{ text-align: center; margin-top: 4em; }}
     '''
 
-    # --- 개선된 제목 인식 로직 ---
     raw_lines = txt_content.splitlines()
     chapters = []
     current_title, current_lines = "시작", []
@@ -39,16 +38,12 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
         if not clean_line: continue
         
         is_title = False
-        # 규칙 1: '제 1화', '제 10장' 등 (가장 표준)
         if re.match(r'^제\s?\d+\s?[화장장편절]', clean_line):
             is_title = True
-        # 규칙 2: '숫자.' 또는 '숫자 '로 시작하고 총 길이가 20자 미만인 경우
         elif re.match(r'^\d+[\.\s]', clean_line) and len(clean_line) < 20:
             is_title = True
-        # 규칙 3: 대괄호나 꺽쇠로 시작하고 총 길이가 15자 미만인 경우 (대사 방지)
         elif re.match(r'^[[<].+[]>]', clean_line) and len(clean_line) < 15:
             is_title = True
-        # 규칙 4: 숫자만 있는 줄
         elif re.match(r'^\d+$', clean_line):
             is_title = True
 
@@ -60,12 +55,10 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
             
     if current_lines: chapters.append((current_title, current_lines))
     if not chapters: chapters.append(("본문", [html.escape(p) for p in raw_lines if p.strip()]))
-    # ---------------------------
 
     with zipfile.ZipFile(epub_stream, "w") as zf:
         zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
         zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
-        
         if has_font and font_type == "리디바탕":
             with open(font_filename, "rb") as f: zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
         zf.writestr("OEBPS/style.css", css_content)
@@ -82,7 +75,6 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
 
         ncx = f'<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{book_id}"/></head><docTitle><text>{title}</text></docTitle><navMap>{nav_points}</navMap></ncx>'
         zf.writestr("OEBPS/toc.ncx", ncx)
-
         font_manifest = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if has_font else ""
         cover_tag, manifest_cover = "", ""
         if cover_io:
@@ -92,36 +84,40 @@ def build_epub_buffer(txt_content, title, font_type, cover_io=None):
 
         opf = f'<?xml version="1.0" encoding="utf-8"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{html.escape(title)}</dc:title><dc:language>ko</dc:language><dc:identifier id="uid">{book_id}</dc:identifier>{cover_tag}</metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="s" href="style.css" media-type="text/css"/>{manifest_items}{font_manifest}{manifest_cover}</manifest><spine toc="ncx">{spine_items}</spine></package>'
         zf.writestr("OEBPS/content.opf", opf)
-
     epub_stream.seek(0)
     return epub_stream
 
 # -------------------------
-# 2. UI 및 로직
+# 2. UI 레이아웃
 # -------------------------
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기")
 
+# 초기 세션 상태 설정
 if "results" not in st.session_state: st.session_state.results = []
 if "selected_cover" not in st.session_state: st.session_state.selected_cover = None
 
 col1, col2 = st.columns([1, 1])
 
+# --- 1번 컬럼: 제목 변수 초기값 선언으로 NameError 방지 ---
 with col1:
     st.header("1. 설정 및 챕터 확인")
     u_txt = st.file_uploader("TXT 파일 선택", type="txt", key="txt_loader")
+    
+    # 파일을 선택하기 전에도 'title'이 존재하도록 기본값 설정
+    display_title = "제목 없음"
     
     if u_txt:
         raw_data = u_txt.getvalue()
         try: text = raw_data.decode("utf-8")
         except: text = raw_data.decode("cp949", errors="ignore")
         
-        # 제목 정제 및 분석
-        raw_title = Path(u_txt.name).stem
-        clean_title = re.sub(r'[\d\-]+.*$', '', raw_title).strip()
-        title = st.text_input("책 제목", value=clean_title if clean_title else "제목 없음")
-
-        # 실시간 챕터 확인 로직
+        # 파일명에서 제목 추출
+        raw_file_name = Path(u_txt.name).stem
+        clean_file_name = re.sub(r'[\d\-]+.*$', '', raw_file_name).strip()
+        display_title = st.text_input("책 제목", value=clean_file_name if clean_file_name else "제목 없음")
+        
+        # 챕터 감지
         detected = []
         for line in text.splitlines():
             cl = line.strip()
@@ -137,14 +133,18 @@ with col1:
                 st.code("\n".join(detected[:50]) + ("\n..." if len(detected) > 50 else ""))
             else:
                 st.warning("인식된 챕터가 없습니다.")
+    else:
+        # 파일이 없을 때도 텍스트 입력을 통해 검색어를 조절할 수 있게 함
+        display_title = st.text_input("책 제목", value="제목 없음")
 
     st.sidebar.header("📖 디자인 설정")
     f_exists = os.path.exists("RIDIBatang.otf")
     f_type = st.sidebar.selectbox("폰트", ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"])
 
+# --- 2번 컬럼: 정의된 display_title 사용 ---
 with col2:
     st.header("2. 표지 선택")
-    search_q = st.text_input("검색어", value=f"{title} 소설 표지")
+    search_q = st.text_input("검색어", value=f"{display_title} 소설 표지")
     
     c1, c2 = st.columns(2)
     with c1:
@@ -185,6 +185,6 @@ if u_txt:
                     c_io = io.BytesIO(r.content)
                 except: pass
             
-            final_epub = build_epub_buffer(text, title, f_type, c_io)
+            final_epub = build_epub_buffer(text, display_title, f_type, c_io)
             st.success("변환 성공!")
-            st.download_button("📥 파일 저장", data=final_epub, file_name=f"{title}.epub")
+            st.download_button("📥 파일 저장", data=final_epub, file_name=f"{display_title}.epub")
