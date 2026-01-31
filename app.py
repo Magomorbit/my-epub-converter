@@ -10,7 +10,7 @@ from pathlib import Path
 from duckduckgo_search import DDGS
 
 # -------------------------
-# 1. EPUB 생성 엔진 (성능 최적화)
+# 1. EPUB 생성 엔진 (성능 및 인식 최적화)
 # -------------------------
 def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
@@ -37,32 +37,26 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
             with open(font_filename, "rb") as f: zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
         zf.writestr("OEBPS/style.css", css_content)
 
-        manifest_items, spine_items, nav_points = "", "", ""
-        
-        # 뷰어 로딩 속도 향상을 위해 너무 긴 본문은 자동으로 쪼개기
         processed_chunks = []
         for ch_t, ch_l in chapters_to_include:
-            # 한 챕터가 대략 5,000자(문단 단위)를 넘지 않도록 재분할
             chunk_size = 50 
             for i in range(0, len(ch_l), chunk_size):
                 sub_l = ch_l[i:i+chunk_size]
-                # 첫 번째 조각에만 챕터 제목 표시, 나머지는 생략
                 sub_t = ch_t if i == 0 else f"{ch_t} (계속)"
                 processed_chunks.append((sub_t, sub_l))
 
+        manifest_items, spine_items, nav_points = "", "", ""
         for i, (ch_t, ch_l) in enumerate(processed_chunks):
             fname = f"ch_{i}.xhtml"
             header = f"<h1>{html.escape(title)}</h1>" if i == 0 else ""
-            # 실제 제목이 "(계속)"인 경우는 화면에 h2를 표시하지 않음 (시각적 연속성)
             display_title = "" if "(계속)" in ch_t else f"<h2>{html.escape(ch_t)}</h2>"
             
             xhtml = f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" type="text/css" href="style.css"/></head><body>{header}{display_title}{"".join([f"<p>{l}</p>" for l in ch_l])}</body></html>'
             zf.writestr(f"OEBPS/{fname}", xhtml)
             manifest_items += f'<item id="c{i}" href="{fname}" media-type="application/xhtml+xml"/>\n'
             spine_items += f'<itemref idref="c{i}"/>\n'
-            # 목차에는 "(계속)" 조각은 넣지 않음
             if "(계속)" not in ch_t:
-                nav_points += f'<navPoint id="p{i}" playOrder="{len(nav_points)+1}"><navLabel><text>{ch_t}</text></navLabel><content src="{fname}"/></navPoint>'
+                nav_points += f'<navPoint id="p{i}" playOrder="{i+1}"><navLabel><text>{ch_t}</text></navLabel><content src="{fname}"/></navPoint>'
 
         ncx = f'<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="{book_id}"/></head><docTitle><text>{title}</text></docTitle><navMap>{nav_points}</navMap></ncx>'
         zf.writestr("OEBPS/toc.ncx", ncx)
@@ -82,7 +76,7 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     return epub_stream
 
 # -------------------------
-# 2. UI 및 로직 (동일)
+# 2. UI 및 제목 판별 로직
 # -------------------------
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
@@ -114,19 +108,33 @@ with col1:
         if use_split == "챕터분할 적용함":
             temp_chapters = []
             curr_t, curr_l = "시작", []
+
             for line in raw_lines:
                 cl = line.strip()
                 if not cl: continue
+                
                 is_ch = False
-                if re.match(r'^제\s?\d+\s?[화장장편절]', cl): is_ch = True
-                elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl): is_ch = True
-                elif re.match(r'^[[<].+[]>]', cl) and len(cl) < 15: is_ch = True
-                elif re.match(r'^\d+$', cl): is_ch = True
+                
+                # 1. 명확한 챕터 패턴 (제 1화, 10장 등)
+                if re.match(r'^제\s?\d+\s?[화장장편절]', cl):
+                    is_ch = True
+                # 2. 숫자로 시작하는 짧은 제목 (스코어 제외)
+                elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl):
+                    is_ch = True
+                # 3. [수정됨] 대괄호/꺽쇠 필터링 강화
+                elif re.match(r'^[[<].+[]>]', cl) and len(cl) < 15:
+                    # 마침표(.)가 있거나, 대화형 문장이면 제목에서 제외
+                    if not any(char in cl for char in ['.', '!', '?']):
+                        is_ch = True
+                # 4. 순수 숫자만 있는 경우
+                elif re.match(r'^\d+$', cl):
+                    is_ch = True
 
                 if is_ch:
                     if curr_l: temp_chapters.append((curr_t, curr_l))
                     curr_t, curr_l = cl, []
-                else: curr_l.append(html.escape(cl))
+                else:
+                    curr_l.append(html.escape(cl))
             if curr_l: temp_chapters.append((curr_t, curr_l))
 
             st.write("### 챕터 필터링")
@@ -139,7 +147,8 @@ with col1:
             if temp_chapters:
                 processed_ch = []
                 for idx, (t, l) in enumerate(temp_chapters):
-                    if idx in selected_indices: processed_ch.append([t, l])
+                    if idx in selected_indices:
+                        processed_ch.append([t, l])
                     else:
                         if processed_ch: processed_ch[-1][1].extend([f"[{t}]"] + l)
                         else: processed_ch.append(["본문", [f"[{t}]"] + l])
@@ -147,7 +156,6 @@ with col1:
         else:
             all_content = [html.escape(line.strip()) for line in raw_lines if line.strip()]
             final_chapters = [("본문", all_content)]
-            st.info("성능 최적화를 위해 내부적으로 본문을 자동 분할하여 생성합니다.")
 
     else:
         display_title = st.text_input("책 제목", value="제목 없음")
@@ -178,13 +186,14 @@ st.divider()
 
 if u_txt and final_chapters:
     if st.button("🚀 EPUB 변환 및 다운로드", type="primary", use_container_width=True):
-        with st.spinner("로딩 최적화 빌드 중..."):
+        with st.spinner("최종 빌드 중..."):
             c_io = None
             if st.session_state.selected_cover:
                 try:
                     r = requests.get(st.session_state.selected_cover, timeout=10)
                     c_io = io.BytesIO(r.content)
                 except: pass
+            
             final_epub = build_epub_buffer(final_chapters, display_title, f_type, c_io)
-            st.success("최적화 완료!")
+            st.success(f"변환 완료! (챕터: {len(final_chapters)}개)")
             st.download_button("📥 파일 저장", data=final_epub, file_name=f"{display_title}.epub")
