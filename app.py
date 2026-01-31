@@ -81,14 +81,23 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
 
+# 세션 초기화 및 관리
 if "search_results" not in st.session_state: st.session_state.search_results = []
 if "final_cover_io" not in st.session_state: st.session_state.final_cover_io = None
+if "refresh_needed" not in st.session_state: st.session_state.refresh_needed = False
+
+# 변환 완료 후 새로고침 로직
+if st.session_state.refresh_needed:
+    st.session_state.search_results = []
+    st.session_state.final_cover_io = None
+    st.session_state.refresh_needed = False
+    st.rerun()
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("1. 설정 및 챕터 확인")
-    u_txt = st.file_uploader("TXT 파일 선택", type="txt")
+    u_txt = st.file_uploader("TXT 파일 선택", type="txt", key="txt_uploader")
     
     f_exists = os.path.exists("RIDIBatang.otf")
     font_options = ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"]
@@ -96,11 +105,10 @@ with col1:
     
     use_split = st.radio("챕터 분할 모드", ["챕터분할 적용함", "안함"], horizontal=True)
     
-    display_title = "제목 없음" # 기본값 설정
+    display_title = "제목 없음"
     final_chapters = []
 
     if u_txt:
-        # 인코딩 인식 강화
         raw_bytes = u_txt.getvalue()
         try:
             detected = from_bytes(raw_bytes).best()
@@ -108,7 +116,6 @@ with col1:
         except:
             text = raw_bytes.decode('cp949', errors='ignore')
 
-        # 파일명 정제 (-는 유지, + _는 공백으로)
         raw_filename = Path(u_txt.name).stem
         clean_name = re.sub(r'[+_]', ' ', raw_filename)
         clean_name = re.sub(r'\s+', ' ', clean_name).strip()
@@ -123,9 +130,7 @@ with col1:
             for line in raw_lines:
                 cl = line.strip()
                 if not cl: continue
-                
                 is_ch = False
-                # 챕터 인식 로직 (대괄호 대사 제외 및 패턴 강화)
                 if re.match(r'^제\s?\d+\s?[화장장편절]', cl): is_ch = True
                 elif re.match(r'^\d+[\.\s]', cl) and len(cl) < 20 and not re.search(r'\d+\s?대\s?\d+', cl): is_ch = True
                 elif re.match(r'^[[<].+[]>]', cl) and len(cl) < 15:
@@ -163,7 +168,7 @@ with col2:
     cover_mode = st.radio("표지 획득 방법", ["이미지 업로드", "이미지 검색"], horizontal=True)
     
     if cover_mode == "이미지 업로드":
-        u_cover = st.file_uploader("표지 이미지 선택", type=["jpg", "jpeg", "png"])
+        u_cover = st.file_uploader("표지 이미지 선택", type=["jpg", "jpeg", "png"], key="cover_uploader")
         if u_cover:
             st.session_state.final_cover_io = io.BytesIO(u_cover.getvalue())
             st.image(u_cover, caption="미리보기", width=120)
@@ -173,7 +178,7 @@ with col2:
             try:
                 with DDGS() as ddgs:
                     st.session_state.search_results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-            except: st.error("검색 제한입니다. 잠시 후 시도하거나 이미지를 업로드하세요.")
+            except: st.error("검색 제한입니다. 잠시 후 시도하세요.")
         
         if st.session_state.search_results:
             grid = st.columns(3)
@@ -184,28 +189,34 @@ with col2:
                         try:
                             r = requests.get(url, timeout=10)
                             st.session_state.final_cover_io = io.BytesIO(r.content)
-                            st.toast("이미지가 선택되었습니다!")
-                        except: st.error("이미지를 불러올 수 없습니다.")
+                            st.toast("이미지 선택됨!")
+                        except: st.error("이미지 로드 실패")
         
         if st.session_state.final_cover_io:
             st.divider()
-            st.image(st.session_state.final_cover_io, caption="최종 선택된 표지", width=120)
+            st.image(st.session_state.final_cover_io, caption="최종 선택 표지", width=120)
 
 st.divider()
 
 # -------------------------
-# 3. 변환 및 후원 섹션
+# 3. 변환 및 자동 초기화 섹션
 # -------------------------
 if u_txt and final_chapters:
+    # 'on_click'을 사용하여 버튼 클릭 시 초기화 플래그를 True로 설정
+    def trigger_refresh():
+        st.session_state.refresh_needed = True
+
     st.download_button(
-        label="💾 EPUB 변환 및 지금 바로 저장",
+        label="💾 EPUB 변환 및 지금 바로 저장 (저장 후 자동 초기화)",
         data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
         file_name=f"{display_title}.epub",
         mime="application/epub+zip",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
+        on_click=trigger_refresh
     )
 
+# 후원 배너
 st.write("") 
 st.markdown(
     """
