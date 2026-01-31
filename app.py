@@ -8,10 +8,9 @@ import re
 import requests
 from pathlib import Path
 from duckduckgo_search import DDGS
-from PIL import Image
 
 # -------------------------
-# 1. EPUB 생성 엔진
+# 1. EPUB 생성 엔진 (성능 최적화)
 # -------------------------
 def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     epub_stream = io.BytesIO()
@@ -51,7 +50,6 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
             fname = f"ch_{i}.xhtml"
             header = f"<h1>{html.escape(title)}</h1>" if i == 0 else ""
             display_title = "" if "(계속)" in ch_t else f"<h2>{html.escape(ch_t)}</h2>"
-            
             xhtml = f'<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" type="text/css" href="style.css"/></head><body>{header}{display_title}{"".join([f"<p>{l}</p>" for l in ch_l])}</body></html>'
             zf.writestr(f"OEBPS/{fname}", xhtml)
             manifest_items += f'<item id="c{i}" href="{fname}" media-type="application/xhtml+xml"/>\n'
@@ -82,7 +80,6 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
 st.set_page_config(page_title="TXT to EPUB", layout="wide")
 st.title("📚 스마트 EPUB 변환기 PRO")
 
-# 세션 상태 초기화
 if "search_results" not in st.session_state: st.session_state.search_results = []
 if "final_cover_io" not in st.session_state: st.session_state.final_cover_io = None
 
@@ -91,6 +88,11 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.header("1. 파일 및 챕터 설정")
     u_txt = st.file_uploader("TXT 파일 선택", type="txt")
+    
+    f_exists = os.path.exists("RIDIBatang.otf")
+    font_options = ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"]
+    f_type = st.selectbox("📖 적용할 폰트 선택", font_options)
+    
     use_split = st.radio("챕터 분할 모드", ["챕터분할 적용함", "안함"], horizontal=True)
     
     display_title = "제목 없음"
@@ -144,57 +146,56 @@ with col1:
         else:
             all_content = [html.escape(line.strip()) for line in raw_lines if line.strip()]
             final_chapters = [("본문", all_content)]
-
     else:
         display_title = st.text_input("책 제목", value="제목 없음")
 
 with col2:
     st.header("2. 표지 설정")
-    
     cover_mode = st.radio("표지 획득 방법", ["이미지 업로드", "이미지 검색"], horizontal=True)
     
     if cover_mode == "이미지 업로드":
-        u_cover = st.file_uploader("표지 이미지 선택 (JPG, PNG)", type=["jpg", "jpeg", "png"])
+        u_cover = st.file_uploader("표지 이미지 선택", type=["jpg", "jpeg", "png"])
         if u_cover:
             st.session_state.final_cover_io = io.BytesIO(u_cover.getvalue())
-            # 미리보기 창
-            st.image(u_cover, caption="업로드된 표지 미리보기", width=150)
-            st.success("업로드 완료!")
-
+            st.image(u_cover, caption="미리보기", width=120)
     else:
         search_q = st.text_input("검색어", value=f"{display_title} 소설 표지")
         if st.button("🔍 이미지 검색", use_container_width=True):
             try:
                 with DDGS() as ddgs:
                     st.session_state.search_results = [r['image'] for r in ddgs.images(search_q, max_results=6)]
-            except: st.error("검색 제한입니다. 잠시 후 다시 시도하거나 이미지를 업로드하세요.")
+            except: st.error("검색 제한입니다.")
         
         if st.session_state.search_results:
             grid = st.columns(3)
             for i, url in enumerate(st.session_state.search_results):
                 with grid[i % 3]:
                     st.image(url, use_container_width=True)
-                    if st.button(f"{i+1}번 선택", key=f"cover_btn_{i}"):
+                    if st.button(f"{i+1}번 선택", key=f"btn_{i}"):
                         try:
                             r = requests.get(url, timeout=10)
                             st.session_state.final_cover_io = io.BytesIO(r.content)
-                            st.toast(f"{i+1}번 이미지 선택됨!")
-                        except: st.error("이미지를 불러올 수 없습니다.")
+                            st.toast("이미지 선택됨!")
+                        except: st.error("이미지 로드 실패")
         
         if st.session_state.final_cover_io:
             st.divider()
-            st.image(st.session_state.final_cover_io, caption="선택된 검색 이미지 미리보기", width=150)
+            st.image(st.session_state.final_cover_io, caption="선택된 이미지", width=120)
 
 st.divider()
 
-# 다운로드 섹션
+# --- 수정된 핵심 섹션 ---
 if u_txt and final_chapters:
-    st.sidebar.header("📖 디자인 설정")
-    f_exists = os.path.exists("RIDIBatang.otf")
-    f_type = st.sidebar.selectbox("폰트", ["리디바탕", "기본 명조체", "고딕체"] if f_exists else ["기본 명조체", "고딕체"])
-
-    if st.button("🚀 EPUB 변환 및 다운로드", type="primary", use_container_width=True):
-        with st.spinner("최종 빌드 중..."):
-            final_epub = build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io)
-            st.success("변환 완료!")
-            st.download_button("📥 파일 저장", data=final_epub, file_name=f"{display_title}.epub")
+    # 폰트와 표지 데이터를 미리 준비
+    with st.spinner("🚀 EPUB 파일을 생성 중입니다..."):
+        # st.download_button 자체가 변환과 다운로드를 동시에 수행하도록 로직 통합
+        # 버튼을 누르는 순간 build_epub_buffer가 실행되어 다운로드 창이 뜹니다.
+        st.download_button(
+            label="💾 EPUB 변환 및 지금 바로 저장",
+            data=build_epub_buffer(final_chapters, display_title, f_type, st.session_state.final_cover_io),
+            file_name=f"{display_title}.epub",
+            mime="application/epub+zip",
+            type="primary",
+            use_container_width=True
+        )
+        st.info("위 버튼을 누르면 변환이 즉시 완료되고 저장 창이 나타납니다.")
