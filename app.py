@@ -11,7 +11,7 @@ from duckduckgo_search import DDGS
 from charset_normalizer import from_bytes
 
 # -------------------------
-# 1. EPUB 생성 엔진 (표준 압축 버전)
+# 1. EPUB 생성 엔진 (표준 규격 준수 버전)
 # -------------------------
 def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
     try:
@@ -30,21 +30,48 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
         }}
         p {{ margin-top: 0; margin-bottom: 1.5em; text-indent: 1em; }}
         h1, h2 {{ text-align: center; }}
+        /* 표지 전용 스타일 */
+        .cover-page {{ text-align: center; padding: 0; margin: 0; height: 100%; }}
+        .cover-img {{ max-width: 100%; max-height: 100%; }}
         '''
 
-        # 표준 ZIP 압축(DEFLATED)을 사용하여 용량과 속도의 균형을 맞춤
+        # 표준 ZIP 압축(DEFLATED) 사용
         with zipfile.ZipFile(epub_stream, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # mimetype은 규약상 압축 없이 저장
+            # 1. mimetype (압축 없이 저장)
             zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            
+            # 2. container.xml
             zf.writestr("META-INF/container.xml", '<?xml version="1.0" encoding="UTF-8"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
             
+            # 3. 스타일 및 폰트
             if embed_font:
                 with open(font_filename, "rb") as f: 
                     zf.writestr(f"OEBPS/fonts/{font_filename}", f.read())
-            
             zf.writestr("OEBPS/style.css", css_content)
 
-            # 챕터 XHTML 생성
+            # 4. 표지 이미지 및 cover.xhtml 처리
+            cover_manifest, cover_meta, cover_spine = "", "", ""
+            if cover_io:
+                # 이미지 파일 저장
+                zf.writestr("OEBPS/cover.jpg", cover_io.getvalue())
+                
+                # cover.xhtml 생성 (정석적인 방식)
+                cover_xhtml = f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Cover</title><style type="text/css">body {{ margin:0; padding:0; text-align:center; }} img {{ max-width:100%; height:auto; }}</style></head>
+<body><div><img src="cover.jpg" alt="cover" /></div></body>
+</html>'''
+                zf.writestr("OEBPS/cover.xhtml", cover_xhtml)
+                
+                cover_manifest = (
+                    '<item id="cover-img" href="cover.jpg" media-type="image/jpeg"/>\n'
+                    '<item id="cover-xhtml" href="cover.xhtml" media-type="application/xhtml+xml"/>'
+                )
+                cover_meta = '<meta name="cover" content="cover-img"/>'
+                cover_spine = '<itemref idref="cover-xhtml" />'
+
+            # 5. 본문 챕터 생성
             for i, (ch_t, ch_l) in enumerate(chapters_to_include):
                 fname = f"ch_{i}.xhtml"
                 header = f"<h1>{html.escape(title)}</h1>" if i == 0 else ""
@@ -61,13 +88,7 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
                 )
                 zf.writestr(f"OEBPS/{fname}", xhtml)
 
-            # 표지 이미지 저장
-            cover_manifest, cover_meta = "", ""
-            if cover_io:
-                zf.writestr("OEBPS/cover.jpg", cover_io.getvalue())
-                cover_manifest = '<item id="cover" href="cover.jpg" media-type="image/jpeg"/>'
-                cover_meta = '<meta name="cover" content="cover"/>'
-
+            # 6. TOC (목차)
             manifest_items = "".join([f'<item id="c{i}" href="ch_{i}.xhtml" media-type="application/xhtml+xml"/>\n' for i in range(len(chapters_to_include))])
             spine_items = "".join([f'<itemref idref="c{i}"/>\n' for i in range(len(chapters_to_include))])
             
@@ -80,8 +101,28 @@ def build_epub_buffer(chapters_to_include, title, font_type, cover_io=None):
             ncx_content.append('</navMap></ncx>')
             zf.writestr("OEBPS/toc.ncx", "".join(ncx_content))
             
+            # 7. content.opf (최종 조립)
             font_item = f'<item id="f" href="fonts/{font_filename}" media-type="application/vnd.ms-opentype"/>' if embed_font else ""
-            opf = f'<?xml version="1.0" encoding="utf-8"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>{html.escape(title)}</dc:title><dc:language>ko</dc:language><dc:identifier id="uid">{book_id}</dc:identifier>{cover_meta}</metadata><manifest><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="s" href="style.css" media-type="text/css"/>{manifest_items}{font_item}{cover_manifest}</manifest><spine toc="ncx">{spine_items}</spine></package>'
+            opf = f'''<?xml version="1.0" encoding="utf-8"?>
+<package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>{html.escape(title)}</dc:title>
+        <dc:language>ko</dc:language>
+        <dc:identifier id="uid">{book_id}</dc:identifier>
+        {cover_meta}
+    </metadata>
+    <manifest>
+        <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+        <item id="s" href="style.css" media-type="text/css"/>
+        {cover_manifest}
+        {manifest_items}
+        {font_item}
+    </manifest>
+    <spine toc="ncx">
+        {cover_spine}
+        {spine_items}
+    </spine>
+</package>'''
             zf.writestr("OEBPS/content.opf", opf)
 
         epub_stream.seek(0)
@@ -100,7 +141,7 @@ if "u_key" not in st.session_state: st.session_state.u_key = 0
 if "cover_data" not in st.session_state: st.session_state.cover_data = None
 if "search_results" not in st.session_state: st.session_state.search_results = []
 
-# 사이드바 초기화 버튼
+# 초기화 버튼
 if st.sidebar.button("♻️ 모든 데이터 초기화"):
     st.session_state.u_key += 1
     st.session_state.cover_data = None
@@ -178,11 +219,10 @@ st.divider()
 # 3. 변환 및 저장
 # -------------------------
 if u_txt and final_chapters:
-    # 파일명 안전 필터링
     safe_name = re.sub(r'[\/:*?"<>|]', '', display_title).strip() or "ebook"
 
     if st.button("✨ EPUB 변환 시작", type="primary", use_container_width=True):
-        with st.spinner("표준 압축으로 EPUB을 생성 중입니다..."):
+        with st.spinner("표지를 포함하여 EPUB을 생성 중입니다..."):
             data = build_epub_buffer(final_chapters, display_title, f_type, st.session_state.cover_data)
             if data:
                 st.download_button(
@@ -194,7 +234,7 @@ if u_txt and final_chapters:
                 )
                 st.success("준비가 완료되었습니다!")
 
-# 하단 후원 정보
+# 후원 링크
 st.markdown(
     """
     <hr style="border:0.5px solid #f0f2f6">
